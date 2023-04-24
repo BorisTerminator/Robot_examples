@@ -1,0 +1,287 @@
+# 30.03.2023
+
+API_Key = ''
+Secret_Key = ''
+# For TG
+API_TOKEN = ''
+TG_CH =  # id dialog
+
+def send_message(text):
+    res = requests.get('https://api.telegram.org/bot{}/sendMessage'.format(API_TOKEN),
+                       params={'chat_id': TG_CH, 'text': text})
+    return res.json()
+
+from binance.client import Client
+import pandas as pd
+import numpy as np
+import  time
+import talib
+import multiprocessing
+import websocket
+import json 
+import ast 
+import math
+import sqlite3
+import datetime
+import logging
+import requests
+#===================================
+# SYMBOL = input('Символ - ')
+# INTERVAL = input('Интервал (5m,15m,1h) - ')
+# LIMIT = 300
+# QNTY = float(input('Объем сделки. Например 0.1 - '))
+# tsl = int(input("TSL допустимые потери - "))
+
+logging.basicConfig(filename='log.log', level=logging.DEBUG, encoding='UTF-8', format='%(asctime)s %(levelname)s %(funcName)s || %(message)s') 
+
+
+SYMBOL = 'BTCUSDT'
+INTERVAL = '1m'
+LIMIT = 300
+QNTY = 0.1
+tsl = 17
+#======================
+client = Client(API_Key, Secret_Key, testnet=True)
+
+conn = sqlite3.connect('Database.db')
+cur = conn.cursor()
+cur.execute("""CREATE TABLE IF NOT EXISTS Order_trades(
+   orderId INT PRIMARY KEY,
+   symbol varchar(10),
+   time_open timestamp,
+   open_price real,
+   direct varchar(10),
+   close_price real,
+   time_close timestamp,
+   Quanty real,
+   Time_Frame varchar(10)
+   );
+""")
+conn.commit()
+conn.close()
+last_id = []
+
+def write_Data(order:dict,type:str,price:float,order_type:str)->str:
+    try:
+        conn = sqlite3.connect('Database.db')
+        cur = conn.cursor()
+        if type == 'Open':
+            value = [order['orderId'],order['symbol'],datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),price,order_type,None, None,order['origQty'],INTERVAL]
+            SQL = """INSERT INTO Order_trades
+                          (orderId, symbol, time_open, open_price, direct, close_price, time_close, Quanty, Time_Frame)
+                          VALUES
+                          (?,?,?,?,?,?,?,?,?);"""
+            cur.execute(SQL,value)
+            conn.commit() 
+            last_id.append(order['orderId'])
+        else:
+            sql='''
+            Update Order_trades 
+            set close_price = ?, time_close=?
+            where orderId = ?
+            '''
+            val=(price,datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),last_id[0])
+            cur.execute(sql,val)
+            conn.commit() 
+            last_id.clear()
+        conn.close()
+        logging.info('Данные записаны успешно')
+        send_message('Данные записаны успешно')
+        return 'Данные записаны успешно'
+    except:
+        send_message('Данные не записаны/не обновлены')
+        logging.warning('Данные не записаны/не обновлены')
+        return 'Данные не записаны/не обновлены' 
+
+
+
+
+
+def get_data():
+    try:
+        while True:
+            klines = client.get_historical_klines(SYMBOL, INTERVAL, limit=LIMIT)
+            klines = [klines[i][4] for i in range (len(klines)) ]
+            klines = np.array(klines, dtype='float')
+            EMA_100 = talib.EMA(klines,100)
+            EMA_5 = talib.EMA(klines,5)
+            indicators = {"EMA_100": EMA_100[-1],"EMA_5":EMA_5[-1]}
+            f = open("indicators.txt", "w")
+            f.write(str(indicators))
+            f.close()
+    except Exception as e:
+        logging.error('Ошибка в 3 потоке. В индикаторах')
+        logging.exception(e)
+        send_message('Ошибка в 3 потоке. В индикаторах')
+        print('Ошибка в 3 потоке. В индикаторах')
+
+# Логика открывания позиции
+
+def place_order (order_type:str,type:str):# 0 - SELL, 1 - BUY   ??????????
+    while True:
+        try:
+            try:
+                with open("Price.txt", "r") as f:
+                    price = (float(f.read()))
+            except:
+                price = 0
+            
+            if order_type == 'BUY':
+                order = client.futures_create_order(symbol=SYMBOL, side='BUY', type='MARKET', quantity=QNTY, recvWindow=10000000000) 
+            else:
+                order = client.futures_create_order(symbol=SYMBOL, side='SELL', type='MARKET', quantity=QNTY, recvWindow=10000000)
+            order['PRICE'] = price
+            order['Status'] = type
+            df = pd.DataFrame(order, index=[1])
+            print(df[['orderId', 'symbol','PRICE', 'Status']])
+            print(f'Ордер - {type}')
+            send_message(f'Ордер - {type}. Price - {price}, symbol - {SYMBOL}, INTERVAL - {INTERVAL}')
+            print(write_Data(order,type,price,order_type))
+            logging.info(f'Ордер - {type}. Price - {price}, symbol - {SYMBOL}, INTERVAL - {INTERVAL}')
+            break
+                                      
+        except:
+            send_message('Не удалось открыть позицию')
+            print('Не удалось открыть позицию')
+            logging.error('Не удалось открыть позицию')
+            time.sleep(1)
+
+#получаем рыночные данные через Websocket во втромо потоке
+
+def on_message(ws, message): 
+    price = json.loads(message)["p"] 
+    #print(f"Current price: {price}") 
+    with open("price.txt", "w") as f:
+        f.write(str(price))
+ 
+def on_error(ws, error): 
+    print(error) 
+ 
+def on_close(ws): 
+    print("### closed ###") 
+ 
+def on_open(ws): 
+    print("### connected ###") 
+ 
+def connect_to_websocket(symbol): 
+    ws = websocket.WebSocketApp(f"wss://stream.binance.com:9443/ws/{symbol.lower()}@aggTrade", 
+                                on_message=on_message, 
+                                on_error=on_error, 
+                                on_close=on_close) 
+    ws.on_open = on_open 
+    ws.run_forever() 
+ 
+def get_current_price(symbol): 
+    price = None 
+    def on_message(ws, message): 
+        nonlocal price 
+        price = json.loads(message)["p"] 
+         
+    connect_to_websocket(symbol) 
+    return price
+
+
+
+# считываем значения из файла
+def get_EMA():
+    try:
+        while True:
+            with open("indicators.txt", "r") as f1:
+                indicators = ast.literal_eval(f1.readline())
+            ema_100,ema_5 = indicators['EMA_100'],indicators['EMA_5'] 
+            return  float(ema_100),float(ema_5)
+    except:
+        time.sleep(0.1)
+
+
+
+# Логика открытия позиции
+def position() -> str:
+    
+    try:
+        ema_100,ema_5 = get_EMA()
+        if ema_100 >ema_5:
+            position = 'preper_for_buy'
+        if ema_100 < ema_5:
+            position = 'preper_for_sell'
+        while True:
+            try:
+                ema_100,ema_5 = get_EMA()
+                #send_message(f'Delta = {ema_5-ema_100}, position- {position}')
+                if (ema_5-ema_100>=2) and position=='preper_for_buy':
+                    #Buy
+                    send_message("Попали в Buy")
+                    place_order('BUY','Open')
+                    return 'BUY'
+                if (ema_100-ema_5>=2) and position=='preper_for_sell':
+                    #Sell
+                    send_message('Попаи в Sell')
+                    place_order('SELL','Open')
+                    return "SELL"
+                time.sleep(10)
+            except:
+                pass
+    except:
+        time.sleep(0.1)
+
+
+def curent_price()->float:
+    while True:
+        try:
+            with open("Price.txt", "r") as f2:
+                price = (float(f2.read()))
+            if type(price )==float and (price > 20000) :
+                return price
+        except:
+            pass
+    
+# Логика отыскания локального минимума
+def stoploss_main(type:str):
+    klines = client.get_historical_klines(SYMBOL, INTERVAL, limit=10)
+    klines = [klines[i][4] for i in range (len(klines)) ]
+    klines = np.array(klines, dtype='float')
+    if type == 'BUY':
+        return min(klines)
+    else:
+        return max(klines)
+
+
+# Логика ведения позиции
+def TSL(type:str):
+    stop_loss = stoploss_main(type)
+    checkpoint = 0
+    checkpoint2 = math.inf
+    while True:       
+        price = curent_price()                
+#=================================================
+        if type == 'BUY':
+            if price < stop_loss:
+                place_order('SELL','Close')
+                break
+            else:
+                if price > checkpoint:
+                    checkpoint = price
+                if (price <= checkpoint -tsl):
+                    place_order('SELL','Close')
+                    break
+        if type == 'SELL':
+            if price < checkpoint2:
+                checkpoint2 = price
+            if (price > checkpoint2 + tsl):
+                place_order('BUY','Close')
+                break
+        
+
+if __name__ == '__main__':
+    print("Робот EMA запущен")
+    send_message("Робот EMA запущен")
+
+    t1 = multiprocessing.Process(target=get_current_price, args=(SYMBOL,), daemon=True)# запускаем второй поток,Websocket
+    t1.start()
+    t2 = multiprocessing.Process(target=get_data, daemon=True) # запускаем 3 поток, индикаторы
+    t2.start()
+    while True:
+        pass
+        ordertype = position()
+        TSL(ordertype)
+        
